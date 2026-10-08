@@ -1,0 +1,554 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Space Explorer</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0b1030; cursor: none; touch-action: none; user-select: none; -webkit-user-select: none; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c'), ctx = canvas.getContext('2d');
+const TAU = Math.PI * 2, FONT = '"Arial Rounded MT Bold", "Chalkboard SE", system-ui, sans-serif';
+let W, H;
+function resize() {
+  const d = devicePixelRatio || 1;
+  W = innerWidth; H = innerHeight;
+  canvas.width = W * d; canvas.height = H * d;
+  ctx.setTransform(d, 0, 0, d, 0, 0);
+}
+addEventListener('resize', resize); resize();
+
+const PLANETS = [
+  { name: 'Mercury', fact: 'Mercury is small and bumpy! Make some bumps!', color: '#c4bcb0', dark: '#7d766d', size: .55, scene: .85 },
+  { name: 'Venus',   fact: 'Venus is hot and cloudy! Wipe the clouds away!', color: '#f3b84f', dark: '#c9772a', size: .75, scene: 1 },
+  { name: 'Earth',   fact: 'Earth is our home! Who lives here?', color: '#4d97ff', dark: '#1c4fb0', size: .8, scene: 1 },
+  { name: 'Mars',    fact: 'Mars is red and dusty! Drive the rover!', color: '#e86a40', dark: '#a43a1c', size: .65, scene: 1 },
+  { name: 'Jupiter', fact: 'Jupiter is the biggest planet! Stir the storm!', color: '#f0c9a0', dark: '#b87a4a', size: 1.25, scene: 1.15 },
+  { name: 'Saturn',  fact: 'Saturn has beautiful rings! Play the rings!', color: '#f5dc95', dark: '#c9a24e', size: .8, scene: .75 },
+  { name: 'Uranus',  fact: 'Uranus rolls on its side! Roll, roll, roll!', color: '#9aeae6', dark: '#4aa8b0', size: .8, scene: .7 },
+  { name: 'Neptune', fact: 'Neptune is blue and very windy! Whoosh!', color: '#5a7bff', dark: '#2337a8', size: .8, scene: 1 },
+  { name: 'The Sun', fact: 'The Sun is a big, hot star! It keeps us warm! Make it shine!', color: '#ffd84a', dark: '#ff9a1f', size: 1, scene: 1 },
+];
+const N = 8; // planets on the map; PLANETS[N] is the Sun
+const ALIENS = [
+  { name: 'Zip', hue: 280, eyes: 1 }, { name: 'Lulu', hue: 330, eyes: 2 }, { name: 'Bo', hue: 300, eyes: 3 }, { name: 'Dusty', hue: 160, eyes: 2 },
+  { name: 'Jojo', hue: 200, eyes: 1 }, { name: 'Ringo', hue: 290, eyes: 3 }, { name: 'Roly', hue: 20, eyes: 2 }, { name: 'Windy', hue: 60, eyes: 1 },
+  { name: 'Sunny', hue: 345, eyes: 2 },
+];
+const UFO_ALIEN = { name: 'Pip', hue: 95, eyes: 2 };
+const ANIMALS =['🐶', '🐱', '🐘', '🦒', '🐳', '🐧', '🦁', '🐢', '🦋', '🐸'];
+const SCALE = [262, 294, 330, 392, 440, 523, 587, 659, 784, 880];
+const DWELL = .9; // seconds of hovering that counts as "choosing"
+
+// ---------- sound & voice ----------
+let ac, lastSound = 0;
+function tone(f, dur = .25, type = 'sine', vol = .15, f2) {
+  if (!ac) return;
+  const o = ac.createOscillator(), g = ac.createGain(), t = ac.currentTime;
+  o.type = type; o.frequency.setValueAtTime(f, t);
+  if (f2) o.frequency.exponentialRampToValueAtTime(f2, t + dur);
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(.001, t + dur);
+  o.connect(g).connect(ac.destination); o.start(t); o.stop(t + dur);
+}
+function blip(n, gap = 90) {
+  const now = performance.now();
+  if (now - lastSound < gap) return;
+  lastSound = now;
+  tone(SCALE[((n % 10) + 10) % 10], .3, 'triangle');
+}
+function tune(notes, step = 130) { notes.forEach((n, i) => setTimeout(() => tone(SCALE[n], .35, 'triangle', .18), i * step)); }
+function say(text) {
+  try {
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    u.rate = .85; u.pitch = 1.2;
+    speechSynthesis.speak(u);
+  } catch (e) {}
+}
+
+// ---------- state ----------
+let mode = 'start', cur = null, hover = null, dwell = 0, homeDwell = 0, trans = 0;
+let fade = 0, fadeColor = '#fff', celebrate = 0, jspin = 0, S = {};
+let ufoHit = 0, ufoNear = false;
+const ptr = { x: W / 2, y: H / 2 }, rocket = { x: W / 2, y: H / 2, a: -Math.PI / 2, face: 1 };
+const particles = [];
+const stars = Array.from({ length: 160 }, () => ({ x: Math.random(), y: Math.random(), r: Math.random() * 1.8 + .4, p: Math.random() * TAU }));
+let visited = new Set();
+try { visited = new Set(JSON.parse(localStorage.getItem('visited') || '[]')); } catch (e) {}
+function save() { try { localStorage.setItem('visited', JSON.stringify([...visited])); } catch (e) {} }
+
+const rnd = (a, b) => a + Math.random() * (b - a);
+function layout() {
+  const u = Math.min(W / 20, H / 6.5);
+  return PLANETS.slice(0, N).map((p, i) => ({ x: W * (.17 + .775 * i / 7), y: H * (i % 2 ? .63 : .4), r: u * p.size }));
+}
+function sun() { return { x: -H * .04, y: H * .5, r: H * .22 }; }
+function geo() { return { cx: W / 2, cy: H * .56, R: Math.min(W, H) * .27 * PLANETS[cur].scene }; }
+function hit() { // what the pointer is over on the map: planet index, -1 for the Sun, or null
+  const s = sun();
+  let h = null;
+  layout().forEach((p, i) => { if (Math.hypot(ptr.x - p.x, ptr.y - p.y) < p.r + 30) h = i; });
+  if (h === null && Math.hypot(ptr.x - s.x, ptr.y - s.y) < s.r) h = -1;
+  return h;
+}
+function home() { return { x: 85, y: H - 85, r: 55 }; }
+
+function spark(x, y, n = 12, colors = ['#fff7a8', '#ffd24a', '#ff9ad5', '#9ae6ff']) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * TAU, v = rnd(80, 320);
+    particles.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: rnd(.5, 1), size: rnd(3, 7), color: colors[i % colors.length] });
+  }
+}
+
+// ---------- flow ----------
+function begin() {
+  try { ac = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {}
+  mode = 'map'; fade = 1; fadeColor = '#0b1030';
+  say("Let's explore space! Fly your rocket to a planet!");
+  tune([0, 2, 4, 7]);
+}
+function launch(i) {
+  mode = 'fly'; cur = i < 0 ? N : i; trans = 0;
+  tone(200, .7, 'sawtooth', .06, 900);
+}
+function enter(i) {
+  const p = PLANETS[i];
+  cur = i; mode = 'planet'; fade = 1; fadeColor = p.color; homeDwell = 0;
+  S = { moved: 0, items: [], glow: [0, 0, 0, 0, 0], band: -1, px: W / 2, jump: 0, done: false, shine: 0, active: 0, alienJump: 0, alienNear: false };
+  if (i === 1) makeClouds();
+  if (i < N && !visited.has(i)) { visited.add(i); save(); }
+  say(p.name + '! ' + p.fact);
+}
+function makeClouds() {
+  S.items = Array.from({ length: 46 }, () => {
+    const a = Math.random() * TAU, d = Math.sqrt(Math.random());
+    return { x: Math.cos(a) * d, y: Math.sin(a) * d, r: rnd(.22, .34), gone: 0 };
+  });
+}
+function goHome() {
+  mode = 'map'; fade = 1; fadeColor = '#0b1030'; hover = null; dwell = 0;
+  tone(880, .5, 'sine', .12, 330);
+  if (visited.size === N) {
+    celebrate = 7;
+    say('You visited all the planets! Great job, space explorer!');
+    tune([0, 2, 4, 5, 7, 5, 7, 9], 170);
+  }
+}
+function bounce() {
+  const { cx, cy } = geo();
+  S.jump = 1; S.alienJump = 1;
+  spark(cur === 6 ? S.px : cx, cy, 24);
+  tune([5, 7, 8], 90);
+}
+
+// ---------- input ----------
+addEventListener('pointermove', e => {
+  const dx = e.clientX - ptr.x, dy = e.clientY - ptr.y;
+  ptr.x = e.clientX; ptr.y = e.clientY;
+  if (mode === 'planet') play(ptr.x, ptr.y, dx, dy);
+});
+addEventListener('contextmenu', e => e.preventDefault());
+addEventListener('pointerdown', e => {
+  ptr.x = e.clientX; ptr.y = e.clientY; // a finger tap arrives with no move before it
+  if (mode === 'start') begin();
+  else if (mode === 'map') { const h = hit(); if (h !== null) launch(h); else { spark(ptr.x, ptr.y); blip(Math.floor(rnd(0, 10))); } }
+  else if (mode === 'planet') { const h = home(); if (Math.hypot(ptr.x - h.x, ptr.y - h.y) < h.r + 15) goHome(); else bounce(); }
+});
+addEventListener('keydown', e => {
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  if ([' ', 'Tab', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Backspace'].includes(e.key)) e.preventDefault();
+  if (e.repeat) return;
+  if (mode === 'start') begin();
+  else if (mode === 'map') { spark(rocket.x, rocket.y); blip(e.key.charCodeAt(0)); }
+  else if (mode === 'planet') bounce();
+});
+
+// Each planet's toy: everything reacts to movement only.
+function play(x, y, dx, dy) {
+  const { cx, cy, R } = geo();
+  const lx = (x - cx) / R, ly = (y - cy) / R, on = lx * lx + ly * ly < 1, d = Math.hypot(dx, dy);
+  S.moved += d; S.active = 1;
+  switch (cur) {
+    case 0: // stamp craters
+      if (on && S.moved > 45) {
+        S.moved = 0;
+        S.items.push({ x: lx, y: ly, r: rnd(.05, .13) });
+        if (S.items.length > 70) S.items.shift();
+        blip(Math.floor(rnd(0, 5))); spark(x, y, 4, ['#fff', '#ddd']);
+      }
+      break;
+    case 1: // wipe clouds
+      for (const c of S.items) if (!c.gone && Math.hypot(lx - c.x, ly - c.y) < c.r + .1) { c.gone = .01; blip(Math.floor(rnd(4, 10)), 60); }
+      if (!S.done && S.items.every(c => c.gone)) {
+        S.done = true; bounce(); say('Hello Venus!');
+        const scene = S;
+        setTimeout(() => { if (mode === 'planet' && S === scene) { makeClouds(); S.done = false; } }, 4500);
+      }
+      break;
+    case 2: // animals pop out
+      if (on && S.moved > 70) {
+        S.moved = 0;
+        particles.push({ x, y, vx: rnd(-90, 90), vy: rnd(-260, -160), g: 120, life: 2, size: rnd(44, 70), e: ANIMALS[Math.floor(rnd(0, ANIMALS.length))] });
+        blip(Math.floor(rnd(0, 10)));
+      }
+      break;
+    case 3: // rover tracks
+      if (on && S.moved > 12) {
+        S.moved = 0;
+        S.items.push({ x: lx, y: ly });
+        if (S.items.length > 600) S.items.shift();
+        particles.push({ x, y: y + 18, vx: rnd(-40, 40), vy: rnd(-70, -20), life: .6, size: rnd(5, 10), color: '#f5b08c' });
+        blip(Math.floor(rnd(0, 3)), 170);
+      }
+      break;
+    case 4: // stir the storm
+      jspin += d * .012;
+      if (S.moved > 60) { S.moved = 0; tone(rnd(110, 190), .4, 'sawtooth', .04, 60); }
+      break;
+    case 5: { // musical rings
+      const k = Math.floor((Math.hypot(lx, ly / .32) - 1.25) / .2);
+      if (k !== S.band) { S.band = k; if (k >= 0 && k < 5) { S.glow[k] = 1; tone(SCALE[k * 2], .7, 'sine', .22); spark(x, y, 5); } }
+      break;
+    }
+    case 6: // rolls after the rocket
+      if (S.moved > 50) { S.moved = 0; blip(Math.floor(x / W * 10), 120); }
+      break;
+    case 7: // wind
+      if (S.moved > 14) {
+        S.moved = 0;
+        particles.push({ x: x + rnd(-40, 40), y: y + rnd(-40, 40), vx: dx * 22 + rnd(-30, 30), vy: dy * 22 + rnd(-30, 30), life: rnd(.6, 1.2), size: rnd(2, 5), streak: true, color: '#e6f0ff' });
+        const now = performance.now();
+        if (now - lastSound > 160) { lastSound = now; tone(rnd(500, 900), .5, 'sine', .05, rnd(250, 400)); }
+      }
+      break;
+    case 8: // shine
+      S.shine = Math.min(1.2, S.shine + d * .004);
+      if (S.moved > 40) {
+        S.moved = 0;
+        const a = Math.atan2(ly, lx), v = rnd(200, 420);
+        particles.push({ x: cx + Math.cos(a) * R, y: cy + Math.sin(a) * R, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 1, size: rnd(4, 8), streak: true, color: '#fff2a0' });
+        blip(Math.floor(S.shine * 8), 110);
+      }
+      break;
+  }
+}
+
+// ---------- drawing ----------
+function label(text, x, y, size, color = '#fff') {
+  ctx.font = `bold ${size}px ${FONT}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.lineWidth = size * .16; ctx.strokeStyle = 'rgba(8,12,40,.8)'; ctx.lineJoin = 'round';
+  ctx.strokeText(text, x, y); ctx.fillStyle = color; ctx.fillText(text, x, y);
+}
+function emoji(e, x, y, size) {
+  ctx.font = `${size}px system-ui`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#fff'; ctx.fillText(e, x, y);
+}
+function blob(x, y, rx, ry, color, rot = 0) {
+  ctx.beginPath(); ctx.ellipse(x, y, rx, ry, rot, 0, TAU); ctx.fillStyle = color; ctx.fill();
+}
+function face(x, y, r) {
+  const lx = Math.max(-1, Math.min(1, (ptr.x - x) / 300)) * r * .04, ly = Math.max(-1, Math.min(1, (ptr.y - y) / 300)) * r * .04;
+  blob(-r * .5, r * .14, r * .11, r * .07, 'rgba(255,120,150,.45)');
+  blob(r * .5, r * .14, r * .11, r * .07, 'rgba(255,120,150,.45)');
+  for (const s of [-1, 1]) {
+    blob(s * r * .3, -r * .1, r * .12, r * .14, '#fff');
+    blob(s * r * .3 + lx, -r * .1 + ly, r * .075, r * .09, '#1b1b3a');
+    blob(s * r * .3 + lx - r * .025, -r * .13 + ly, r * .025, r * .025, '#fff');
+  }
+  ctx.beginPath(); ctx.arc(0, r * .12, r * .26, .15 * Math.PI, .85 * Math.PI);
+  ctx.lineWidth = r * .06; ctx.lineCap = 'round'; ctx.strokeStyle = '#1b1b3a'; ctx.stroke();
+}
+// Friendly alien, drawn with its feet at the origin.
+function drawAlien(a, s, t, wave) {
+  const body = `hsl(${a.hue},70%,62%)`, dark = `hsl(${a.hue},60%,42%)`;
+  ctx.lineCap = 'round'; ctx.strokeStyle = dark; ctx.lineWidth = s * .1;
+  for (const d of [-1, 1]) {
+    ctx.beginPath(); ctx.moveTo(d * s * .2, -s * 1.3); ctx.lineTo(d * s * .38, -s * 1.75); ctx.stroke();
+    blob(d * s * .38, -s * 1.78, s * .1, s * .1, '#ffe58a');
+  }
+  const w = -.9 + Math.sin(t * 9) * .5 * wave;
+  ctx.strokeStyle = body; ctx.lineWidth = s * .16;
+  ctx.beginPath(); ctx.moveTo(-s * .45, -s * .8); ctx.lineTo(-s * .8, -s * .5); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(s * .45, -s * .8); ctx.lineTo(s * .45 + Math.cos(w) * s * .5, -s * .8 + Math.sin(w) * s * .5); ctx.stroke();
+  blob(-s * .25, -s * .06, s * .2, s * .11, dark); blob(s * .25, -s * .06, s * .2, s * .11, dark);
+  blob(0, -s * .75, s * .55, s * .7, body);
+  blob(0, -s * .38, s * .3, s * .24, `hsl(${a.hue},80%,82%)`);
+  for (let k = 0; k < a.eyes; k++) {
+    const ex = (k - (a.eyes - 1) / 2) * s * .34, er = a.eyes === 1 ? s * .22 : s * .15;
+    blob(ex, -s * 1.02, er, er, '#fff'); blob(ex, -s, er * .55, er * .55, '#1b1b3a');
+  }
+  ctx.beginPath(); ctx.arc(0, -s * .78, s * .16, .15 * Math.PI, .85 * Math.PI);
+  ctx.lineWidth = s * .06; ctx.strokeStyle = '#1b1b3a'; ctx.stroke();
+}
+function greet(x, y, text) {
+  for (let k = 0; k < 5; k++) particles.push({ x: x + rnd(-30, 30), y, vx: rnd(-60, 60), vy: rnd(-200, -90), life: 1.4, size: rnd(24, 38), e: '💖' });
+  tune([7, 9, 7, 9], 80);
+  try { if (!speechSynthesis.speaking) say(text); } catch (e) {}
+}
+function drawUfo(t, dt) {
+  const x = W * (.56 + .36 * Math.sin(t * .23)), y = H * (.13 + .05 * Math.sin(t * .6)), s = Math.min(W, H) * .05;
+  ufoHit = Math.max(0, ufoHit - dt * 1.5);
+  const touch = Math.hypot(ptr.x - x, ptr.y - y) < s * 2;
+  if (touch && !ufoNear) { ufoHit = 1; greet(x, y, "Hello, space friend! I'm Pip!"); }
+  ufoNear = touch;
+  ctx.save(); ctx.translate(x, y - Math.sin(ufoHit * Math.PI) * s);
+  ctx.rotate(Math.sin(t * 2) * .08 + Math.sin(ufoHit * TAU * 2) * .4);
+  blob(0, -s * .35, s * .75, s * .75, 'rgba(180,230,255,.35)');
+  ctx.save(); ctx.translate(0, s * .55); drawAlien(UFO_ALIEN, s * .6, t, 1 + ufoHit * 2); ctx.restore();
+  blob(0, s * .2, s * 1.7, s * .45, '#aab4d8'); blob(0, s * .1, s * 1.7, s * .35, '#d5dcf5');
+  for (let k = -2; k <= 2; k++) blob(k * s * .6, s * .22, s * .1, s * .08, `hsl(${(t * 120 + k * 60) % 360},100%,65%)`);
+  ctx.restore();
+}
+function rings(i, r, front, glow) {
+  const a0 = front ? 0 : Math.PI, a1 = front ? Math.PI : TAU;
+  ctx.save();
+  if (i === 5) {
+    ctx.scale(1, .32);
+    for (let k = 0; k < 5; k++) {
+      const g = glow ? glow[k] : 0;
+      ctx.beginPath(); ctx.arc(0, 0, r * (1.35 + .2 * k), a0, a1);
+      ctx.lineWidth = r * (.17 + g * .05);
+      ctx.strokeStyle = g > .05 ? `hsl(${k * 55 + 20}, 100%, ${70 + g * 20}%)` : ['#e9cf8f', '#c9a96a', '#f3e2b0', '#b9976a', '#e2c88a'][k];
+      ctx.stroke();
+    }
+  } else {
+    ctx.rotate(Math.PI / 2); ctx.scale(1, .28);
+    ctx.beginPath(); ctx.arc(0, 0, r * 1.55, a0, a1);
+    ctx.lineWidth = r * .1; ctx.strokeStyle = '#d8fbff'; ctx.stroke();
+  }
+  ctx.restore();
+}
+function features(i, r, t) {
+  switch (i) {
+    case 0:
+      for (const [x, y, s] of [[-.5, -.45, .14], [.45, -.55, .1], [.6, .2, .16], [-.3, .55, .12], [.1, .65, .08], [-.7, .1, .09]]) blob(x * r, y * r, s * r, s * r, 'rgba(90,84,76,.55)');
+      break;
+    case 1:
+      for (let j = -2; j <= 2; j++) blob(Math.sin(t * .4 + j) * r * .15, j * r * .38, r * 1.2, r * .09, 'rgba(255,236,170,.45)');
+      break;
+    case 2:
+      blob(-r * .45, -r * .35, r * .38, r * .28, '#4cc46a', .4); blob(-r * .3, r * .45, r * .22, r * .34, '#4cc46a', -.3);
+      blob(r * .5, -r * .05, r * .3, r * .45, '#4cc46a', .2); blob(r * .15, -r * .75, r * .25, r * .12, '#4cc46a');
+      blob(0, -r * 1.02, r * .5, r * .16, '#fff'); blob(0, r * 1.02, r * .55, r * .16, '#fff');
+      break;
+    case 3:
+      blob(-r * .4, r * .45, r * .35, r * .2, 'rgba(140,50,25,.5)', .3); blob(r * .45, -r * .5, r * .3, r * .16, 'rgba(140,50,25,.5)', -.4);
+      blob(0, -r * 1.02, r * .45, r * .15, '#fff');
+      break;
+    case 4:
+      for (let j = -4; j <= 4; j++) {
+        ctx.fillStyle = j % 2 ? '#c98d5a' : '#fbe6cc';
+        const y = j * r * .23 + Math.sin(jspin + j * 1.7) * r * .035;
+        ctx.beginPath(); ctx.moveTo(-r, y);
+        for (let x = -r; x <= r; x += r / 8) ctx.lineTo(x, y + Math.sin(x / r * 5 + jspin * 2 + j) * r * .03);
+        ctx.lineTo(r, y + r * .12); ctx.lineTo(-r, y + r * .12); ctx.fill();
+      }
+      ctx.save(); ctx.translate(r * .38, r * .42); ctx.rotate(jspin * 2);
+      blob(0, 0, r * .24, r * .16, '#d1553a'); blob(0, 0, r * .13, r * .07, '#f08a6a');
+      ctx.restore();
+      break;
+    case 5:
+      for (let j = -2; j <= 2; j++) blob(0, j * r * .36, r * 1.2, r * .07, 'rgba(190,150,80,.35)');
+      break;
+    case 7:
+      blob(-r * .4, r * .4, r * .22, r * .13, 'rgba(25,35,130,.6)', .2);
+      blob(r * .3 + Math.sin(t) * r * .1, -r * .55, r * .3, r * .04, 'rgba(255,255,255,.7)'); blob(-r * .2 - Math.sin(t) * r * .1, r * .7, r * .25, r * .035, 'rgba(255,255,255,.7)');
+      break;
+  }
+}
+function drawPlanet(i, x, y, r, t, rot = 0, extra, glow) {
+  const p = PLANETS[i];
+  ctx.save(); ctx.translate(x, y); ctx.rotate(rot);
+  if (i === 5 || i === 6) rings(i, r, false, glow);
+  const g = ctx.createRadialGradient(-r * .35, -r * .35, r * .1, 0, 0, r);
+  g.addColorStop(0, p.color); g.addColorStop(1, p.dark);
+  ctx.beginPath(); ctx.arc(0, 0, r, 0, TAU); ctx.fillStyle = g; ctx.fill();
+  ctx.save(); ctx.clip(); features(i, r, t); if (extra) extra(r); ctx.restore();
+  face(x, y, r);
+  if (i === 5 || i === 6) rings(i, r, true, glow);
+  ctx.restore();
+}
+function drawSky(t) {
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#070a24'); g.addColorStop(1, '#1a1550');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  for (const s of stars) {
+    ctx.globalAlpha = .5 + .5 * Math.sin(t * 2 + s.p);
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(s.x * W, s.y * H, s.r, 0, TAU); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+function drawDwell(x, y, r, frac) {
+  ctx.beginPath(); ctx.arc(x, y, r, -Math.PI / 2, -Math.PI / 2 + TAU * Math.min(1, frac));
+  ctx.lineWidth = 8; ctx.lineCap = 'round'; ctx.strokeStyle = '#fff7a8'; ctx.stroke();
+}
+function drawMap(t) {
+  const s = sun(), pulse = 1 + Math.sin(t * 2) * .02;
+  const g = ctx.createRadialGradient(s.x, s.y, s.r * .3, s.x, s.y, s.r * 1.7);
+  g.addColorStop(0, 'rgba(255,220,90,.9)'); g.addColorStop(1, 'rgba(255,160,40,0)');
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(s.x, s.y, s.r * 1.7, 0, TAU); ctx.fill();
+  blob(s.x, s.y, s.r * pulse, s.r * pulse, '#ffd23f');
+  ctx.save(); ctx.translate(s.x + s.r * .45, s.y); face(s.x + s.r * .45, s.y, s.r * .5); ctx.restore();
+
+  layout().forEach((p, i) => {
+    const big = hover === i ? 1.15 : 1, bob = Math.sin(t * 1.5 + i) * 6;
+    drawPlanet(i, p.x, p.y + bob, p.r * big, t);
+    if (visited.has(i)) emoji('⭐', p.x + p.r * .8, p.y + bob - p.r * .9, 34);
+    if (hover === i) {
+      drawDwell(p.x, p.y + bob, p.r * big + 22, dwell / DWELL);
+      label(PLANETS[i].name, p.x, p.y + bob + p.r * big + 62, 40);
+    }
+  });
+  drawUfo(t, 1 / 60);
+  if (hover === -1) drawDwell(s.x, s.y, s.r + 22, dwell / DWELL);
+  if (hover === -1) label('The Sun', s.x + s.r * .6, s.y + s.r + 50, 40, '#ffe58a');
+}
+function drawScene(t, dt) {
+  const { cx, cy, R } = geo(), p = PLANETS[cur];
+  S.jump = Math.max(0, S.jump - dt * 2);
+  const y = cy - Math.sin(S.jump * Math.PI) * 50;
+  let x = cx, rot = 0, extra;
+
+  if (cur === 0) extra = r => { for (const c of S.items) { blob(c.x * r, c.y * r, c.r * r, c.r * r, 'rgba(70,64,58,.7)'); blob(c.x * r + c.r * r * .15, c.y * r + c.r * r * .15, c.r * r * .75, c.r * r * .75, 'rgba(150,142,132,.8)'); } };
+  if (cur === 3) extra = r => { for (const c of S.items) blob(c.x * r, c.y * r, r * .03, r * .03, 'rgba(120,40,20,.7)'); };
+  if (cur === 6) {
+    S.px += (Math.max(R, Math.min(W - R, ptr.x)) - S.px) * Math.min(1, dt * 4);
+    x = S.px; rot = (S.px - W / 2) / R;
+  }
+  if (cur === N) { // glow and rays grow as the rocket moves
+    S.shine = Math.max(0, S.shine - dt * .5);
+    const gr = R * (1.6 + S.shine * .6), g = ctx.createRadialGradient(cx, y, R * .8, cx, y, gr);
+    g.addColorStop(0, 'rgba(255,210,80,.8)'); g.addColorStop(1, 'rgba(255,160,40,0)');
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(cx, y, gr, 0, TAU); ctx.fill();
+    ctx.fillStyle = '#ffc233';
+    for (let k = 0; k < 14; k++) {
+      const a = k / 14 * TAU + t * .4, len = R * (1.2 + S.shine * .5 + Math.sin(t * 5 + k) * .04);
+      ctx.beginPath(); ctx.moveTo(cx + Math.cos(a - .1) * R, y + Math.sin(a - .1) * R);
+      ctx.lineTo(cx + Math.cos(a) * len, y + Math.sin(a) * len);
+      ctx.lineTo(cx + Math.cos(a + .1) * R, y + Math.sin(a + .1) * R); ctx.fill();
+    }
+  }
+  for (let k = 0; k < 5; k++) S.glow[k] = Math.max(0, S.glow[k] - dt * 1.5);
+  if (cur === 4) jspin += dt * .3;
+
+  drawPlanet(cur, x, y, R, t, rot, extra, S.glow);
+
+  if (cur === 1) for (const c of S.items) {
+    if (c.gone) c.gone += dt * 2;
+    if (c.gone >= 1) continue;
+    ctx.globalAlpha = .96 * (1 - c.gone);
+    const k = 1 + c.gone * .6;
+    blob(cx + c.x * R * k, y + c.y * R * k - c.gone * 40, c.r * R, c.r * R * .8, '#fff3cf');
+    ctx.globalAlpha = 1;
+  }
+
+  // the planet's alien stands on the surface, dances while you play, and says hi when touched
+  const aa = -Math.PI / 2 + .75 + rot, s = Math.min(W, H) * .075;
+  const ax = x + Math.cos(aa) * R, ay = y + Math.sin(aa) * R;
+  S.alienJump = Math.max(0, S.alienJump - dt * 2); S.active = Math.max(0, S.active - dt);
+  const hop = Math.sin(S.alienJump * Math.PI) * s * .8 + Math.abs(Math.sin(t * 7)) * s * .15 * S.active;
+  ctx.save(); ctx.translate(ax, ay); ctx.rotate(aa + Math.PI / 2); ctx.translate(0, s * .05 - hop);
+  drawAlien(ALIENS[cur], s, t, .4 + S.active + S.alienJump);
+  ctx.restore();
+  const bx = ax + Math.cos(aa) * s * .75, by = ay + Math.sin(aa) * s * .75;
+  const touch = Math.hypot(ptr.x - bx, ptr.y - by) < s * 1.1;
+  if (touch && !S.alienNear) { S.alienJump = 1; greet(bx, by - s, `Hi! I'm ${ALIENS[cur].name}!`); }
+  S.alienNear = touch;
+
+  label(p.name, W / 2, H * .1, Math.min(H * .1, 90), p.color);
+
+  const h = home(), near = Math.hypot(ptr.x - h.x, ptr.y - h.y) < h.r + 15;
+  homeDwell = near ? homeDwell + dt : 0;
+  blob(h.x, h.y, h.r, h.r, near ? 'rgba(255,255,255,.35)' : 'rgba(255,255,255,.15)');
+  emoji('🏠', h.x, h.y + 3, 56);
+  if (near) drawDwell(h.x, h.y, h.r + 10, homeDwell / DWELL);
+  if (homeDwell > DWELL) goHome();
+}
+function drawParticles(dt) {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.life -= dt;
+    if (p.life <= 0) { particles.splice(i, 1); continue; }
+    p.vy += (p.g || 0) * dt; p.x += p.vx * dt; p.y += p.vy * dt;
+    ctx.globalAlpha = Math.min(1, p.life * 2);
+    if (p.e) emoji(p.e, p.x, p.y, p.size);
+    else if (p.streak) { ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(p.x - p.vx * .12, p.y - p.vy * .12); ctx.lineWidth = p.size; ctx.lineCap = 'round'; ctx.strokeStyle = p.color; ctx.stroke(); }
+    else blob(p.x, p.y, p.size, p.size, p.color);
+  }
+  ctx.globalAlpha = 1;
+}
+function drawRocket(dt) {
+  const dx = ptr.x - rocket.x, dy = ptr.y - rocket.y, sp = Math.hypot(dx, dy);
+  if (sp > 4) {
+    let da = Math.atan2(dy, dx) - rocket.a;
+    da = Math.atan2(Math.sin(da), Math.cos(da));
+    rocket.a += da * Math.min(1, dt * 10);
+    if (Math.abs(dx) > 2) rocket.face = dx > 0 ? -1 : 1;
+    if (!(mode === 'planet' && cur === 3))
+      particles.push({ x: rocket.x - Math.cos(rocket.a) * 26, y: rocket.y - Math.sin(rocket.a) * 26, vx: rnd(-30, 30), vy: rnd(-30, 30), life: .4, size: rnd(4, 8), color: Math.random() < .5 ? '#ffb347' : '#ff6b4a' });
+  }
+  rocket.x += dx * Math.min(1, dt * 14); rocket.y += dy * Math.min(1, dt * 14);
+  ctx.save(); ctx.translate(rocket.x, rocket.y);
+  if (mode === 'planet' && cur === 3) { ctx.scale(rocket.face, 1); emoji('🚙', 0, 0, 60); }
+  else { ctx.rotate(rocket.a + Math.PI / 4); emoji('🚀', 0, 0, 64); }
+  ctx.restore();
+}
+
+// ---------- main loop ----------
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(.05, (now - last) / 1000), t = now / 1000;
+  last = now;
+  drawSky(t);
+
+  if (mode === 'start') {
+    emoji('🚀', W / 2, H * .36 + Math.sin(t * 2) * 14, Math.min(H * .25, 200));
+    label('Space Explorer', W / 2, H * .62, Math.min(W * .08, 90), '#ffe58a');
+    label('Click or press any key to start', W / 2, H * .74, Math.min(W * .03, 30));
+    label('Move the rocket over a planet and hold still to fly there.', W / 2, H * .88, Math.min(W * .018, 18), '#aab');
+  } else if (mode === 'map' || mode === 'fly') {
+    if (mode === 'map') {
+      const h = hit();
+      if (h !== hover) {
+        hover = h; dwell = 0;
+        if (h === -1) { say('The Sun! So hot and bright!'); tone(392, .4, 'triangle'); }
+        else if (h !== null) { say(PLANETS[h].name); tone(SCALE[h], .3, 'triangle'); }
+      } else if (h !== null && !celebrate) {
+        dwell += dt;
+        if (dwell > DWELL) launch(h);
+      }
+    }
+    drawMap(t);
+    if (mode === 'fly') {
+      const p = cur === N ? sun() : layout()[cur];
+      trans += dt / .7;
+      ctx.globalAlpha = Math.min(1, trans * 1.5);
+      blob(p.x, p.y, trans * trans * Math.max(W, H) * 1.3, trans * trans * Math.max(W, H) * 1.3, PLANETS[cur].color);
+      ctx.globalAlpha = 1;
+      if (trans >= 1) enter(cur);
+    }
+    if (celebrate > 0) {
+      celebrate -= dt;
+      label('You did it!', W / 2, H * .14, Math.min(W * .09, 100), '#ffe58a');
+      for (let k = 0; k < 2; k++) particles.push({ x: rnd(0, W), y: -20, vx: rnd(-60, 60), vy: rnd(120, 320), life: 3, size: rnd(5, 10), color: `hsl(${rnd(0, 360)},100%,70%)` });
+      if (celebrate <= 0) { celebrate = 0; visited.clear(); save(); }
+    }
+  } else drawScene(t, dt);
+
+  drawParticles(dt);
+  if (mode !== 'start') drawRocket(dt);
+  if (fade > 0) {
+    fade -= dt * 2;
+    ctx.globalAlpha = Math.max(0, fade); ctx.fillStyle = fadeColor; ctx.fillRect(0, 0, W, H); ctx.globalAlpha = 1;
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
